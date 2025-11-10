@@ -10,6 +10,7 @@ CONFIG_PATHS = {
         else r"%APPDATA%\Claude\claude_desktop_config.json"  # Windows
     ),
     "cursor": "~/.cursor/mcp.json",
+    "vscode": ".vscode/mcp.json"
 }
 
 
@@ -51,7 +52,9 @@ def main():
     if not os.path.isdir(os.path.join(current_dir, ".venv")):
         raise FileNotFoundError("Use uv to create a virtual environment first. ")
 
-    config_data["mcpServers"]["MaxMSPMCP"] = {
+    mcp_name = "mcpServers" if args.client != "vscode" else "servers"
+
+    config_data[mcp_name]["MaxMSPMCP"] = {
         "command": "mcp",
         "args": ["run", os.path.join(current_dir, "server.py")],
         "env": {

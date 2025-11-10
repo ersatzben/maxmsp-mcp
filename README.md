@@ -39,6 +39,7 @@ cd MaxMSP-MCP-Server
 3. Start a new environment and install python dependencies:
 ```
 uv venv
+source .venv/bin/activate
 uv pip install -r requirements.txt
 ```
 4. Connect the MCP server to a MCP client (which hosts LLMs):
