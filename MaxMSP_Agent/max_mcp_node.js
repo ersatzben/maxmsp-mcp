@@ -28,7 +28,6 @@ Max.addHandler("response", async (...msg) => {
 	var str = msg.join("")
 	var data = safe_parse_json(str);
 	await io.of(NAMESPACE).emit("response", data);
-	// await Max.post(`Sent response: ${JSON.stringify(data)}`);
 });
 
 Max.addHandler("port", async (msg) => {
@@ -48,12 +47,12 @@ io.of(NAMESPACE).on("connection", (socket) => {
   Max.post(`Socket.IO client connected: ${socket.id}`);
 
   socket.on("command", async (data) => {
-    // Max.post(`Socket.IO command received: ${data}`);
-	  Max.outlet("command", JSON.stringify(data)); 
+	  Max.outlet("command", JSON.stringify(data));
   });
 
   socket.on("request", async (data) => {
-	  Max.outlet("request", JSON.stringify(data)); 
+    // Route requests through same outlet as commands - js handles both
+	  Max.outlet("command", JSON.stringify(data));
   });
 
   socket.on("port", async (data) => {

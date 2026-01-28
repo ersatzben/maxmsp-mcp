@@ -119,6 +119,61 @@ mcp = FastMCP(
     lifespan=server_lifespan,
 )
 
+# Math objects that require float arguments (or explicit int_mode)
+# These objects default to integer mode which truncates floats - a common source of bugs
+FLOAT_REQUIRED_OBJECTS = {"+", "-", "*", "/", "!+", "!-", "!*", "!/", "%", "scale"}
+
+# Pack objects - require float arguments (or explicit int_mode) like math objects
+# This prevents the common bug of [pack 0 100] outputting ints when used with line~
+PACK_OBJECTS = {"pack", "pak"}
+
+# Objects that should be rejected with a suggestion for the correct alternative
+REJECTED_OBJECTS = {
+    "times~": "*~",
+}
+
+# Objects with minimum argument requirements
+MIN_ARGS_OBJECTS = {
+    "comb~": {
+        "min_args": 5,
+        "usage": "[comb~ maxdelay delay feedback feedforward gain] e.g. [comb~ 1000 100 0.9 0.5 1.]",
+    },
+}
+
+# Parameter range validations (require extend=True to bypass)
+PARAM_RANGE_CHECKS = {
+    "svf~": {
+        "arg_index": 1,  # Q is second argument (after frequency)
+        "check": lambda v: v >= 1,
+        "error": "svf~ Q/resonance should be 0-1, not 0-100. Got {value}. "
+                 "Set extend=True if you really want Q >= 1.",
+    },
+    "onepole~": {
+        "arg_index": 0,  # frequency is first argument
+        "check": lambda v: v < 10,
+        "error": "onepole~ takes frequency in Hz (e.g., 5000), not a coefficient. Got {value}. "
+                 "Set extend=True if you really want frequency < 10 Hz.",
+    },
+}
+
+
+def _has_float_arg(args: list) -> bool:
+    """Check if any argument is a float (not an integer)."""
+    for arg in args:
+        if isinstance(arg, float):
+            return True
+    return False
+
+
+def _pack_has_float_arg(args: list) -> bool:
+    """Check if pack/pak has at least one float argument or 'f' type specifier."""
+    for arg in args:
+        if isinstance(arg, float):
+            return True
+        if isinstance(arg, str) and arg.lower() == "f":
+            return True
+    return False
+
 
 @mcp.tool()
 async def add_max_object(
@@ -127,6 +182,8 @@ async def add_max_object(
     obj_type: str,
     varname: str,
     args: list,
+    int_mode: bool = False,
+    extend: bool = False,
 ):
     """Add a new Max object.
 
@@ -138,18 +195,78 @@ async def add_max_object(
         obj_type (str): Type of the Max object (e.g., "cycle~", "dac~").
         varname (str): Variable name for the object.
         args (list): Arguments for the object.
+        int_mode (bool): For math objects (+, -, *, /, %, scale, etc.) and pack/pak,
+                         set True to allow integer-only arguments. By default, these objects
+                         require at least one float argument (or 'f' type specifier for pack/pak)
+                         to prevent unintended integer truncation.
+        extend (bool): Bypass parameter range checks. Use when you intentionally want
+                       unusual values like svf~ Q >= 1 or onepole~ frequency < 10 Hz.
+
+    Returns:
+        dict: Result with success/error status.
     """
+    # Reject objects with known alternatives
+    if obj_type in REJECTED_OBJECTS:
+        correct = REJECTED_OBJECTS[obj_type]
+        return {
+            "success": False,
+            "error": f"WRONG OBJECT: '{obj_type}' does not exist. Use '{correct}' instead.",
+        }
+
+    # Validate minimum argument requirements
+    if obj_type in MIN_ARGS_OBJECTS:
+        req = MIN_ARGS_OBJECTS[obj_type]
+        if len(args) < req["min_args"]:
+            return {
+                "success": False,
+                "error": f"MISSING ARGUMENTS: '{obj_type}' requires at least {req['min_args']} arguments. "
+                         f"Usage: {req['usage']}",
+            }
+
+    # Validate float requirement for math objects
+    if obj_type in FLOAT_REQUIRED_OBJECTS:
+        if not _has_float_arg(args) and not int_mode:
+            example = f"[{obj_type} 0.]" if not args else f"[{obj_type} {args[0]}.]"
+            return {
+                "success": False,
+                "error": f"FLOAT REQUIRED: '{obj_type}' defaults to integer mode which truncates floats. "
+                         f"Use a float argument (e.g., {example}) or set int_mode=True if integer truncation is intended.",
+            }
+
+    # Validate float requirement for pack/pak objects
+    if obj_type in PACK_OBJECTS:
+        if not _pack_has_float_arg(args) and not int_mode:
+            example = f"[{obj_type} 0. 100]" if len(args) >= 2 else f"[{obj_type} f]"
+            return {
+                "success": False,
+                "error": f"FLOAT REQUIRED: '{obj_type}' with integer arguments outputs integers. "
+                         f"Use float arguments (e.g., {example}) or 'f' type specifier, "
+                         f"or set int_mode=True if integer output is intended.",
+            }
+
+    # Validate parameter ranges (unless extend=True)
+    if obj_type in PARAM_RANGE_CHECKS and not extend:
+        check = PARAM_RANGE_CHECKS[obj_type]
+        idx = check["arg_index"]
+        if len(args) > idx:
+            value = args[idx]
+            if isinstance(value, (int, float)) and check["check"](value):
+                return {
+                    "success": False,
+                    "error": f"PARAM RANGE: {check['error'].format(value=value)}",
+                }
+
     maxmsp = ctx.request_context.lifespan_context.get("maxmsp")
     assert len(position) == 2, "Position must be a list of two integers."
-    cmd = {"action": "add_object"}
-    kwargs = {
+    payload = {
+        "action": "add_object",
         "position": position,
         "obj_type": obj_type,
         "args": args,
         "varname": varname,
     }
-    cmd.update(kwargs)
-    await maxmsp.send_command(cmd)
+    response = await maxmsp.send_request(payload, timeout=5.0)
+    return response
 
 
 @mcp.tool()
@@ -372,7 +489,7 @@ async def get_objects_in_patch(
     """
     maxmsp = ctx.request_context.lifespan_context.get("maxmsp")
     payload = {"action": "get_objects_in_patch"}
-    response = await maxmsp.send_request(payload)
+    response = await maxmsp.send_request(payload, timeout=5.0)
 
     return [response]
 
@@ -390,7 +507,7 @@ async def get_objects_in_selected(
     """
     maxmsp = ctx.request_context.lifespan_context.get("maxmsp")
     payload = {"action": "get_objects_in_selected"}
-    response = await maxmsp.send_request(payload)
+    response = await maxmsp.send_request(payload, timeout=5.0)
 
     return [response]
 
@@ -426,6 +543,259 @@ async def get_avoid_rect_position(ctx: Context):
     payload = {"action": "get_avoid_rect_position"}
     response = await maxmsp.send_request(payload)
 
+    return response
+
+
+# ========================================
+# Subpatcher navigation tools:
+
+
+@mcp.tool()
+async def create_subpatcher(
+    ctx: Context,
+    position: list,
+    varname: str,
+    name: str = "subpatch",
+):
+    """Create a new subpatcher (p object) in the current patcher context.
+
+    After creating, use enter_subpatcher to navigate inside and add objects.
+    The subpatcher will have no inlets/outlets initially - add them with add_subpatcher_io.
+
+    Args:
+        position (list): Position in the Max patch as [x, y].
+        varname (str): Variable name for the subpatcher object (used to enter it later).
+        name (str): Display name shown in the subpatcher title bar.
+    """
+    maxmsp = ctx.request_context.lifespan_context.get("maxmsp")
+    cmd = {"action": "create_subpatcher"}
+    kwargs = {
+        "position": position,
+        "varname": varname,
+        "name": name,
+    }
+    cmd.update(kwargs)
+    await maxmsp.send_command(cmd)
+
+
+@mcp.tool()
+async def enter_subpatcher(ctx: Context, varname: str):
+    """Navigate into a subpatcher to add/modify objects inside it.
+
+    After entering, all object operations (add_max_object, connect_max_objects, etc.)
+    will operate within this subpatcher context.
+
+    Use exit_subpatcher to return to the parent patcher.
+
+    Args:
+        varname (str): Variable name of the subpatcher object to enter.
+    """
+    maxmsp = ctx.request_context.lifespan_context.get("maxmsp")
+    cmd = {"action": "enter_subpatcher"}
+    kwargs = {"varname": varname}
+    cmd.update(kwargs)
+    await maxmsp.send_command(cmd)
+
+
+@mcp.tool()
+async def exit_subpatcher(ctx: Context):
+    """Exit the current subpatcher and return to the parent patcher.
+
+    If already at root level, this has no effect.
+    """
+    maxmsp = ctx.request_context.lifespan_context.get("maxmsp")
+    cmd = {"action": "exit_subpatcher"}
+    await maxmsp.send_command(cmd)
+
+
+@mcp.tool()
+async def get_patcher_context(ctx: Context):
+    """Get information about the current patcher navigation context.
+
+    Returns the depth (0 = root), path of subpatcher names, and whether at root.
+
+    Returns:
+        dict: Context info with 'depth', 'path' (list of varnames), and 'is_root'.
+    """
+    maxmsp = ctx.request_context.lifespan_context.get("maxmsp")
+    payload = {"action": "get_patcher_context"}
+    response = await maxmsp.send_request(payload)
+    return response
+
+
+@mcp.tool()
+async def add_subpatcher_io(
+    ctx: Context,
+    position: list,
+    io_type: str,
+    varname: str,
+    comment: str = "",
+):
+    """Add an inlet or outlet object inside a subpatcher.
+
+    These create the connection points visible on the parent patcher's subpatcher object.
+    Must be called while inside a subpatcher (after enter_subpatcher).
+
+    Args:
+        position (list): Position as [x, y]. Inlets should be at top, outlets at bottom.
+        io_type (str): One of "inlet", "outlet", "inlet~", or "outlet~".
+        varname (str): Variable name for the io object.
+        comment (str): Optional assistance text shown when hovering over the inlet/outlet.
+    """
+    maxmsp = ctx.request_context.lifespan_context.get("maxmsp")
+    cmd = {"action": "add_subpatcher_io"}
+    kwargs = {
+        "position": position,
+        "io_type": io_type,
+        "varname": varname,
+        "comment": comment,
+    }
+    cmd.update(kwargs)
+    await maxmsp.send_command(cmd)
+
+
+# ========================================
+# Object manipulation enhancements:
+
+
+@mcp.tool()
+async def get_object_connections(ctx: Context, varname: str):
+    """Get all connections (inputs and outputs) for a specific object.
+
+    Returns connection information that can be used to restore connections
+    after recreating an object with different arguments.
+
+    Args:
+        varname (str): Variable name of the object.
+
+    Returns:
+        dict: Contains 'inputs' (connections coming INTO this object) and
+              'outputs' (connections going OUT of this object).
+    """
+    maxmsp = ctx.request_context.lifespan_context.get("maxmsp")
+    payload = {"action": "get_object_connections", "varname": varname}
+    response = await maxmsp.send_request(payload)
+    return response
+
+
+@mcp.tool()
+async def recreate_with_args(
+    ctx: Context,
+    varname: str,
+    new_args: list,
+):
+    """Recreate an existing object with new arguments, preserving all connections.
+
+    This is an atomic operation that:
+    1. Gets the object's current position, type, and connections
+    2. Removes the object
+    3. Creates a new object with the same type but new arguments
+    4. Restores all input and output connections
+
+    Useful for changing object parameters that can only be set at creation time.
+
+    Args:
+        varname (str): Variable name of the object to recreate.
+        new_args (list): New arguments for the object.
+
+    Returns:
+        dict: Status of the operation including any errors.
+    """
+    maxmsp = ctx.request_context.lifespan_context.get("maxmsp")
+    payload = {"action": "recreate_with_args", "varname": varname, "new_args": new_args}
+    response = await maxmsp.send_request(payload, timeout=5.0)
+    return response
+
+
+@mcp.tool()
+async def move_object(
+    ctx: Context,
+    varname: str,
+    x: int,
+    y: int,
+):
+    """Move an object to a new position in the patch.
+
+    Args:
+        varname (str): Variable name of the object to move.
+        x (int): New x coordinate (pixels from left).
+        y (int): New y coordinate (pixels from top).
+
+    Returns:
+        dict: Status of the operation.
+    """
+    maxmsp = ctx.request_context.lifespan_context.get("maxmsp")
+    payload = {"action": "move_object", "varname": varname, "x": x, "y": y}
+    response = await maxmsp.send_request(payload)
+    return response
+
+
+@mcp.tool()
+async def autofit_existing(
+    ctx: Context,
+    varname: str,
+):
+    """Apply auto-fit sizing to an existing object.
+
+    Resizes the object width to fit its text content.
+    Skips UI objects like toggle, button, slider, etc.
+
+    Args:
+        varname (str): Variable name of the object to resize.
+    """
+    maxmsp = ctx.request_context.lifespan_context.get("maxmsp")
+    cmd = {"action": "autofit_existing", "varname": varname}
+    await maxmsp.send_command(cmd)
+
+
+@mcp.tool()
+async def check_signal_safety(ctx: Context):
+    """Analyze the current patch for potentially dangerous signal patterns.
+
+    Checks for:
+    - Dangerous feedback loops (excludes valid tapout~ -> tapin~ patterns)
+    - High gain *~ objects (> 1.0)
+    - Unsafe comb~ feedback values (>= 1.0)
+    - Missing limiter (clip~, tanh~, etc.) before dac~
+
+    Returns:
+        dict: Contains 'warnings' list and 'safe' boolean.
+    """
+    maxmsp = ctx.request_context.lifespan_context.get("maxmsp")
+    payload = {"action": "check_signal_safety"}
+    response = await maxmsp.send_request(payload, timeout=5.0)
+    return response
+
+
+@mcp.tool()
+async def encapsulate(
+    ctx: Context,
+    varnames: list,
+    subpatcher_name: str,
+    subpatcher_varname: str,
+):
+    """Encapsulate a set of objects into a new subpatcher.
+
+    This is similar to Max's Edit > Encapsulate command. It takes the specified
+    objects, moves them into a new subpatcher, and automatically creates inlets
+    and outlets to preserve all external connections.
+
+    Args:
+        varnames (list): List of varnames of objects to encapsulate.
+        subpatcher_name (str): Display name for the subpatcher (shown in title bar).
+        subpatcher_varname (str): Variable name for the subpatcher object.
+
+    Returns:
+        dict: Status including number of objects encapsulated, inlets/outlets created.
+    """
+    maxmsp = ctx.request_context.lifespan_context.get("maxmsp")
+    payload = {
+        "action": "encapsulate",
+        "varnames": varnames,
+        "subpatcher_name": subpatcher_name,
+        "subpatcher_varname": subpatcher_varname,
+    }
+    response = await maxmsp.send_request(payload, timeout=10.0)
     return response
 
 
