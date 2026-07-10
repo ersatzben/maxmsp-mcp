@@ -54,6 +54,7 @@ def main():
 
     mcp_name = "mcpServers" if args.client != "vscode" else "servers"
 
+    config_data.setdefault(mcp_name, {})
     config_data[mcp_name]["MaxMSPMCP"] = {
         "command": "mcp",
         "args": ["run", os.path.join(current_dir, "server.py")],
